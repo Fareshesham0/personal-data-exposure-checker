@@ -1,0 +1,491 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.1.0
+  description: API specification
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: breach
+    description: Data breach exposure operations
+  - name: observability
+    description: Internal metrics and observability operations
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      description: Returns server health status
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+
+  /check:
+    post:
+      operationId: checkExposure
+      tags: [breach]
+      summary: Check if an email or password appears in known data breaches
+      description: |
+        Accepts an email address or password.
+        - Email: queried against HIBP breached accounts database.
+        - Password: checked using k-anonymity (only a 5-character SHA-1 prefix is
+          sent to HIBP — the raw password never leaves the client/server boundary
+          in identifiable form).
+        No raw identifier is logged or stored. Returns breach details, a risk
+        score, and prioritized security recommendations.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CheckExposureBody"
+      responses:
+        "200":
+          description: Breach check result with risk assessment
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExposureResult"
+        "400":
+          description: Invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Breach intelligence service unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /stats:
+    get:
+      operationId: getMetrics
+      tags: [observability]
+      summary: Server performance metrics snapshot
+      description: |
+        Returns a snapshot of in-memory metrics for the API server: request
+        counts, latency percentiles, external-call performance, HIBP breach
+        metadata cache state, and rate-limiter state. **No identifiers are
+        recorded** — only request paths, status codes, durations, and
+        counters. Used by the internal `/stats` dashboard.
+      responses:
+        "200":
+          description: Metrics snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Metrics"
+
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+
+    CheckExposureBody:
+      type: object
+      properties:
+        identifier:
+          type: string
+          description: >
+            Email address, or password to check. Passwords are checked
+            server-side using SHA-1 k-anonymity — only a 5-character prefix
+            of the hash is transmitted to the breach database. The raw password
+            is never forwarded to any external service.
+        identifierType:
+          type: string
+          enum: [email, password]
+          description: The type of identifier being checked
+      required:
+        - identifier
+        - identifierType
+
+    BreachEntry:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Name of the breached service or dataset
+        domain:
+          type: ["string", "null"]
+          description: Domain of the breached service
+        breachDate:
+          type: ["string", "null"]
+          description: Date the breach occurred (ISO 8601 date string, e.g. 2016-10-01)
+        addedDate:
+          type: string
+          description: Date the breach was added to the HIBP database
+        pwnCount:
+          type: ["integer", "null"]
+          description: Number of accounts exposed in this breach
+        dataClasses:
+          type: array
+          items:
+            type: string
+          description: Types of data exposed (e.g. Email addresses, Passwords, Phone numbers)
+        description:
+          type: ["string", "null"]
+          description: Brief description of the breach
+        isVerified:
+          type: boolean
+          description: Whether the breach has been verified by HIBP
+        isSensitive:
+          type: boolean
+          description: Whether the breach is marked sensitive by HIBP
+        severityScore:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Per-breach severity score (0-100), derived from data-class sensitivity, recency, and exposure scale.
+        severityLevel:
+          $ref: "#/components/schemas/SeverityLevel"
+      required:
+        - name
+        - addedDate
+        - dataClasses
+        - isVerified
+        - isSensitive
+        - severityScore
+        - severityLevel
+
+    RiskLevel:
+      type: string
+      enum: [none, low, medium, high]
+      description: Qualitative risk level based on breach frequency, recency, and data sensitivity
+
+    SeverityLevel:
+      type: string
+      enum: [low, medium, high]
+      description: Qualitative severity bucket for an individual breach.
+
+    RiskFactors:
+      type: object
+      description: |
+        Numeric contribution of each scoring factor to the overall 0-100 risk
+        score. Always present in the response so the contract is uniform across
+        check types. For email checks the three caps are 40/30/30. For password
+        checks the score is single-dimension (driven by HIBP Pwned Passwords
+        occurrence count) so all three factors are returned as 0; the UI hides
+        the breakdown for password checks.
+      properties:
+        frequency:
+          type: integer
+          minimum: 0
+          maximum: 40
+        recency:
+          type: integer
+          minimum: 0
+          maximum: 30
+        sensitivity:
+          type: integer
+          minimum: 0
+          maximum: 30
+      required:
+        - frequency
+        - recency
+        - sensitivity
+
+    ExposureResult:
+      type: object
+      properties:
+        exposed:
+          type: boolean
+          description: Whether the identifier was found in any known breach
+        breachCount:
+          type: integer
+          description: Total number of breaches the identifier appears in
+        breaches:
+          type: array
+          items:
+            $ref: "#/components/schemas/BreachEntry"
+          description: >
+            For email checks: list of breach records. For password checks:
+            a single synthetic entry describing the pwned password count.
+        riskLevel:
+          $ref: "#/components/schemas/RiskLevel"
+        riskScore:
+          type: number
+          description: Numeric risk score (0-100) before qualitative bucketing
+        factors:
+          $ref: "#/components/schemas/RiskFactors"
+        riskExplanation:
+          type: string
+          description: Plain-English explanation of how the risk level was determined
+        recommendations:
+          type: array
+          items:
+            type: string
+          description: Prioritized list of security recommendations for the user
+        checkedAt:
+          type: string
+          description: ISO 8601 timestamp of when the check was performed
+        pwnedCount:
+          type: ["integer", "null"]
+          description: >
+            For password checks only — how many times this password appeared
+            in breach data. Null for email checks.
+      required:
+        - exposed
+        - breachCount
+        - breaches
+        - riskLevel
+        - riskScore
+        - factors
+        - riskExplanation
+        - recommendations
+        - checkedAt
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+      required:
+        - error
+
+    LatencyStats:
+      type: object
+      description: Aggregated latency stats over a rolling window of recent samples.
+      properties:
+        count:
+          type: integer
+          description: Number of samples currently in the rolling window.
+        meanMs:
+          type: number
+          description: Arithmetic mean of the samples, in milliseconds.
+        p50Ms:
+          type: number
+          description: 50th percentile latency, in milliseconds.
+        p95Ms:
+          type: number
+          description: 95th percentile latency, in milliseconds.
+        p99Ms:
+          type: number
+          description: 99th percentile latency, in milliseconds.
+      required:
+        - count
+        - meanMs
+        - p50Ms
+        - p95Ms
+        - p99Ms
+
+    EndpointStatusCount:
+      type: object
+      properties:
+        statusCode:
+          type: integer
+        count:
+          type: integer
+      required:
+        - statusCode
+        - count
+
+    EndpointMetrics:
+      type: object
+      properties:
+        endpoint:
+          type: string
+          description: Static endpoint path. Never contains user-supplied data.
+        total:
+          type: integer
+        byStatus:
+          type: array
+          items:
+            $ref: "#/components/schemas/EndpointStatusCount"
+      required:
+        - endpoint
+        - total
+        - byStatus
+
+    ExternalCallMetrics:
+      type: object
+      properties:
+        target:
+          type: string
+          enum: [hibp.breaches, xposedornot.checkEmail, hibp.pwnedPasswords]
+        ok:
+          type: integer
+        fail:
+          type: integer
+        latencyMs:
+          $ref: "#/components/schemas/LatencyStats"
+      required:
+        - target
+        - ok
+        - fail
+        - latencyMs
+
+    RateLimitPolicy:
+      type: object
+      properties:
+        endpoint:
+          type: string
+        windowMs:
+          type: integer
+        max:
+          type: integer
+      required:
+        - endpoint
+        - windowMs
+        - max
+
+    HistoryEntry:
+      type: object
+      description: |
+        One minute-bucket of aggregated metrics for sparkline display.
+        Contains no identifiers — only counts and latency figures.
+      properties:
+        ts:
+          type: integer
+          description: Unix timestamp (milliseconds) when this bucket was flushed.
+        requestsPerMin:
+          type: integer
+          description: Number of HTTP requests received during this one-minute bucket.
+        checkP95Ms:
+          type: number
+          description: p95 latency (ms) of /api/check calls at the moment of the flush.
+        cacheHitRate:
+          type: number
+          description: HIBP cache hit-rate during this bucket (0–1), or 0 when no lookups occurred.
+      required:
+        - ts
+        - requestsPerMin
+        - checkP95Ms
+        - cacheHitRate
+
+    Metrics:
+      type: object
+      description: |
+        Snapshot of in-memory server metrics. Contains *no identifiers* — only
+        endpoint paths, status codes, durations, and counters.
+      properties:
+        startedAt:
+          type: string
+          description: ISO-8601 timestamp of when the server process started.
+        uptimeSeconds:
+          type: integer
+        requests:
+          type: object
+          properties:
+            total:
+              type: integer
+            rateLimited429:
+              type: integer
+            errors4xx:
+              type: integer
+            errors5xx:
+              type: integer
+            perEndpoint:
+              type: array
+              items:
+                $ref: "#/components/schemas/EndpointMetrics"
+            checkByType:
+              type: object
+              properties:
+                email:
+                  type: integer
+                password:
+                  type: integer
+                unknown:
+                  type: integer
+              required:
+                - email
+                - password
+                - unknown
+          required:
+            - total
+            - rateLimited429
+            - errors4xx
+            - errors5xx
+            - perEndpoint
+            - checkByType
+        latency:
+          type: object
+          properties:
+            allHttpMs:
+              $ref: "#/components/schemas/LatencyStats"
+            checkMs:
+              $ref: "#/components/schemas/LatencyStats"
+          required:
+            - allHttpMs
+            - checkMs
+        externalCalls:
+          type: array
+          items:
+            $ref: "#/components/schemas/ExternalCallMetrics"
+        hibpCache:
+          type: object
+          properties:
+            populated:
+              type: boolean
+            ageSeconds:
+              type: ["integer", "null"]
+            entries:
+              type: ["integer", "null"]
+            hits:
+              type: integer
+            misses:
+              type: integer
+            hitRate:
+              type: number
+              description: hits / (hits + misses), or 0 when no lookups have occurred.
+          required:
+            - populated
+            - ageSeconds
+            - entries
+            - hits
+            - misses
+            - hitRate
+        rateLimit:
+          type: object
+          properties:
+            rejected429:
+              type: integer
+            policies:
+              type: array
+              items:
+                $ref: "#/components/schemas/RateLimitPolicy"
+          required:
+            - rejected429
+            - policies
+        history:
+          type: array
+          description: |
+            Ring buffer of per-minute metric snapshots (up to 15 entries,
+            oldest first). Used to render sparklines on the /stats dashboard.
+            Empty until the first minute elapses after server start.
+          items:
+            $ref: "#/components/schemas/HistoryEntry"
+        privacyNote:
+          type: string
+      required:
+        - startedAt
+        - uptimeSeconds
+        - requests
+        - latency
+        - externalCalls
+        - hibpCache
+        - rateLimit
+        - history
+        - privacyNote
