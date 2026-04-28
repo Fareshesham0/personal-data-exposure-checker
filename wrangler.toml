@@ -1,0 +1,8 @@
+name = "personal-data-exposure-checker"
+compatibility_date = "2026-04-29"
+pages_build_output_dir = "artifacts/exposure-checker/dist/public"
+
+[[kv_namespaces]]
+binding = "PDEC_KV"
+id = "REPLACE_WITH_PRODUCTION_KV_NAMESPACE_ID"
+preview_id = "REPLACE_WITH_PREVIEW_KV_NAMESPACE_ID"
