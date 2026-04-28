@@ -4,10 +4,11 @@ A privacy-preserving FYP web app that checks whether an email or password has ap
 
 ## Cloudflare Pages (Free Tier) Deployment
 
-This repo is now deployable as a single Cloudflare Pages project:
+This repo is deployed as a single Cloudflare Pages project:
 1. Static frontend build output: `artifacts/exposure-checker/dist/public`
 2. API routes: Pages Functions under `functions/api/*`
 3. KV binding required: `PDEC_KV`
+4. Public deployment: `https://personal-data-exposure-checker.pages.dev`
 
 ### Setup
 
@@ -35,3 +36,9 @@ Use these settings in the Pages UI:
 ## Architecture Notes
 
 See `PROJECT.md` and `replit.md` for project details and implementation notes.
+
+## Upstream APIs
+
+1. XposedOrNot is called directly with no API key.
+2. HIBP Pwned Passwords uses k-anonymity and sends only the SHA-1 prefix.
+3. HIBP public breach metadata is cached server-side for email results.

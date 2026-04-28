@@ -15,7 +15,7 @@ Primary user flows:
 
 Monorepo (pnpm workspace), key packages:
 1. `artifacts/exposure-checker`: Vite + React frontend.
-2. `artifacts/api-server`: Express 5 API server (Node runtime).
+2. `artifacts/api-server`: legacy Express 5 API server (Node runtime, kept for reference).
 3. `lib/api-spec`: OpenAPI source.
 4. `lib/api-client-react`: generated React Query client/hooks.
 5. `lib/api-zod`: generated runtime schemas.
@@ -28,11 +28,11 @@ Main API contract (from `lib/api-spec/openapi.yaml`):
 
 Frontend consumes relative `/api/*` endpoints through generated client.
 
-## Current Runtime Architecture (Before Refactor)
+## Current Runtime Architecture
 1. Frontend is static-build Vite output (`artifacts/exposure-checker/dist/public`).
-2. Backend is Express + Node-only patterns (`app.listen`, middleware stack, `process.hrtime`, Node crypto).
-3. Metrics are in-memory process state with ring buffers and periodic bucketing.
-4. Rate limiting currently uses `express-rate-limit` for `/api/check`.
+2. Production API runs on Cloudflare Pages Functions under `functions/api/*`.
+3. Legacy Express API remains in the repo for reference but is not the deployed path.
+4. Shared edge state uses KV for rate-limit counters and deployment metadata.
 5. No persistent app database is required for core behavior.
 
 ## Cloudflare Pages Gap Analysis
@@ -53,6 +53,7 @@ Chosen decisions:
 1. Keep everything Pages-only (single Pages project) and use KV where shared state is needed.
 2. Keep `/stats` publicly accessible.
 3. Keep existing app/API surface behavior for end users.
+4. XposedOrNot does not use an API key; calls are unauthenticated.
 
 Planned target topology:
 1. Static frontend from `artifacts/exposure-checker`.
@@ -69,3 +70,4 @@ Will remain the same:
 
 Runtime-level caveat to document after refactor:
 1. Any cross-edge shared state implemented with KV is eventually consistent by design.
+2. Stats are intentionally lightweight on Pages Free so they stay within CPU limits.
