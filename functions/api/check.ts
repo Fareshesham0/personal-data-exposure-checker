@@ -1,31 +1,34 @@
-import {
-  CheckExposureBody,
-  CheckExposureResponse,
-} from "../../lib/api-zod/src/index";
-import { checkEmailBreaches, checkPasswordPwned } from "../_lib/hibp";
-import { getIp, json, options, parseJson, withMetrics } from "../_lib/http";
-import { metrics } from "../_lib/metrics";
-import {
-  checkRateLimit,
-  getCheckPolicy,
-} from "../_lib/rate-limit";
-import {
-  assessBreachSeverity,
-  assessEmailRisk,
-  assessPasswordRisk,
-} from "../_lib/risk-scoring";
+import { getIp, json, options, parseJson } from "../_lib/http";
+import { checkRateLimit } from "../_lib/rate-limit";
 import type { Env } from "../_lib/types";
 
-metrics.registerRateLimitPolicy(getCheckPolicy());
+interface CheckExposureBody {
+  identifier: string;
+  identifierType: "email" | "password";
+}
+
+function validateBody(body: unknown): { ok: true; data: CheckExposureBody } | { ok: false; error: string } {
+  if (!body || typeof body !== "object") return { ok: false, error: "Invalid request body." };
+  const b = body as Record<string, unknown>;
+  if (typeof b.identifier !== "string") return { ok: false, error: "identifier must be a string." };
+  if (b.identifierType !== "email" && b.identifierType !== "password") {
+    return { ok: false, error: "identifierType must be either email or password." };
+  }
+  return {
+    ok: true,
+    data: {
+      identifier: b.identifier,
+      identifierType: b.identifierType,
+    },
+  };
+}
 
 export const onRequestOptions = () => options();
 
-export const onRequestPost: PagesFunction<Env> = async (ctx) =>
-  withMetrics(ctx, async () => {
+export const onRequestPost: PagesFunction<Env> = async (ctx) => {
     const ip = getIp(ctx.request);
     const allowed = await checkRateLimit(ctx.env, ip);
     if (!allowed.allowed) {
-      metrics.recordRateLimited();
       return json(
         { error: "Too many requests. Please wait a moment and try again." },
         429,
@@ -35,11 +38,10 @@ export const onRequestPost: PagesFunction<Env> = async (ctx) =>
     const body = await parseJson<unknown>(ctx.request);
     if (!body) return json({ error: "Invalid JSON body." }, 400);
 
-    const parsed = CheckExposureBody.safeParse(body);
-    if (!parsed.success) return json({ error: parsed.error.message }, 400);
+    const parsed = validateBody(body);
+    if (!parsed.ok) return json({ error: parsed.error }, 400);
 
     const { identifier, identifierType } = parsed.data;
-    metrics.recordCheckIdentifierType(identifierType);
 
     if (identifierType === "email") {
       const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -55,7 +57,9 @@ export const onRequestPost: PagesFunction<Env> = async (ctx) =>
 
     try {
       if (identifierType === "email") {
-        const breaches = await checkEmailBreaches(identifier);
+        const [{ checkEmailBreaches }, { assessBreachSeverity, assessEmailRisk }] =
+          await Promise.all([import("../_lib/hibp"), import("../_lib/risk-scoring")]);
+        const breaches = await checkEmailBreaches(identifier, ctx.env.XPOSEDORNOT_API_KEY);
         const { riskLevel, riskScore, riskExplanation, recommendations, factors } =
           assessEmailRisk(breaches);
 
@@ -76,7 +80,7 @@ export const onRequestPost: PagesFunction<Env> = async (ctx) =>
           };
         });
 
-        const result = CheckExposureResponse.parse({
+        const result = {
           exposed: breaches.length > 0,
           breachCount: breaches.length,
           breaches: mappedBreaches,
@@ -87,10 +91,14 @@ export const onRequestPost: PagesFunction<Env> = async (ctx) =>
           recommendations,
           checkedAt: new Date().toISOString(),
           pwnedCount: null,
-        });
+        };
         return json(result);
       }
 
+      const [{ checkPasswordPwned }, { assessPasswordRisk }] = await Promise.all([
+        import("../_lib/hibp"),
+        import("../_lib/risk-scoring"),
+      ]);
       const { found, count } = await checkPasswordPwned(identifier);
       const { riskLevel, riskScore, riskExplanation, recommendations, factors } =
         assessPasswordRisk(found, count);
@@ -114,7 +122,7 @@ export const onRequestPost: PagesFunction<Env> = async (ctx) =>
           ]
         : [];
 
-      const result = CheckExposureResponse.parse({
+      const result = {
         exposed: found,
         breachCount: found ? 1 : 0,
         breaches,
@@ -125,7 +133,7 @@ export const onRequestPost: PagesFunction<Env> = async (ctx) =>
         recommendations,
         checkedAt: new Date().toISOString(),
         pwnedCount: found ? count : null,
-      });
+      };
       return json(result);
     } catch (error) {
       const e = error as Error & { statusCode?: number };
@@ -140,4 +148,4 @@ export const onRequestPost: PagesFunction<Env> = async (ctx) =>
         e.statusCode ?? 503,
       );
     }
-  });
+  };
