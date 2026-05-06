@@ -14,7 +14,11 @@ interface HibpPublicBreach {
 }
 
 interface XposedResponse {
-  breaches?: string[][];
+  breaches?: unknown;
+  status?: unknown;
+  Error?: unknown;
+  error?: unknown;
+  message?: unknown;
 }
 
 const XPOSED_BASE = "https://api.xposedornot.com/v1";
@@ -25,6 +29,13 @@ const CACHE_TTL_MS = 60 * 60 * 1000;
 let hibpBreachCachePromise: Promise<Map<string, HibpPublicBreach>> | null = null;
 let cacheTimestamp = 0;
 let lastCacheEntries: number | null = null;
+
+const NO_BREACH_MARKERS = new Set([
+  "not found",
+  "no breach found",
+  "no breaches found",
+  "no data breach found",
+]);
 
 function stripHtml(html: string): string {
   return html
@@ -79,6 +90,45 @@ async function getHibpBreachCache(): Promise<Map<string, HibpPublicBreach>> {
   return hibpBreachCachePromise;
 }
 
+function normalizeBreachNames(data: XposedResponse): string[] {
+  if (typeof data.status === "string" && data.status.toLowerCase().includes("not found")) {
+    return [];
+  }
+  if (typeof data.Error === "string" && data.Error.toLowerCase().includes("not found")) {
+    return [];
+  }
+  if (typeof data.error === "string" && data.error.toLowerCase().includes("not found")) {
+    return [];
+  }
+
+  const raw = data.breaches;
+  if (!raw) return [];
+
+  const names: string[] = [];
+  const append = (value: unknown) => {
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (trimmed) names.push(trimmed);
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) append(item);
+      return;
+    }
+    if (value && typeof value === "object") {
+      for (const nested of Object.values(value as Record<string, unknown>)) append(nested);
+    }
+  };
+
+  append(raw);
+
+  const unique = Array.from(new Set(names));
+  if (unique.length === 1 && NO_BREACH_MARKERS.has(unique[0]!.toLowerCase())) {
+    return [];
+  }
+  return unique;
+}
+
 export async function checkEmailBreaches(email: string, xposedApiKey?: string): Promise<HibpBreach[]> {
   const normalizedEmail = email.trim().toLowerCase();
   const url = `${XPOSED_BASE}/check-email/${encodeURIComponent(normalizedEmail)}`;
@@ -104,7 +154,7 @@ export async function checkEmailBreaches(email: string, xposedApiKey?: string): 
       throw Object.assign(new Error("Breach intelligence service temporarily unavailable"), { statusCode: 503 });
     }
     const data = (await response.json()) as XposedResponse;
-    const breachNames = data.breaches && data.breaches.length > 0 ? data.breaches[0]! : [];
+    const breachNames = normalizeBreachNames(data);
     if (breachNames.length === 0) return [];
     try {
       const cache = await getHibpBreachCache();
