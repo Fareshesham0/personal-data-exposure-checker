@@ -1,7 +1,7 @@
 import type { Env } from "./types";
 
 const CHECK_LIMIT_WINDOW_MS = 60_000;
-const CHECK_LIMIT_MAX = 20;
+const CHECK_LIMIT_MAX = 120;
 const REJECTED_COUNTER_KEY = "rate_limit:rejected429";
 
 function currentWindowStart(): number {

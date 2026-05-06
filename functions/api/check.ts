@@ -30,8 +30,16 @@ export const onRequestPost: PagesFunction<Env> = async (ctx) => {
     const allowed = await checkRateLimit(ctx.env, ip);
     if (!allowed.allowed) {
       return json(
-        { error: "Too many requests. Please wait a moment and try again." },
+        {
+          error:
+            "Too many checks from this network right now. Please wait about a minute and try again.",
+          code: "RATE_LIMIT_LOCAL",
+        },
         429,
+        {
+          "retry-after": "60",
+          "x-rate-limit-source": "local",
+        },
       );
     }
 
@@ -139,8 +147,16 @@ export const onRequestPost: PagesFunction<Env> = async (ctx) => {
       const e = error as Error & { statusCode?: number };
       if (e.statusCode === 429) {
         return json(
-          { error: "Too many requests. Please wait a moment and try again." },
-          429,
+          {
+            error:
+              "Breach provider is temporarily rate-limiting requests. Please retry in about a minute.",
+            code: "RATE_LIMIT_UPSTREAM",
+          },
+          503,
+          {
+            "retry-after": "60",
+            "x-rate-limit-source": "upstream",
+          },
         );
       }
       return json(

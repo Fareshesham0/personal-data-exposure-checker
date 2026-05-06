@@ -7,10 +7,17 @@ const JSON_HEADERS = {
   "access-control-allow-headers": "content-type",
 } as const;
 
-export function json(data: unknown, status = 200): Response {
+export function json(
+  data: unknown,
+  status = 200,
+  headers?: Record<string, string>,
+): Response {
   return new Response(JSON.stringify(data), {
     status,
-    headers: JSON_HEADERS,
+    headers: {
+      ...JSON_HEADERS,
+      ...(headers ?? {}),
+    },
   });
 }
 

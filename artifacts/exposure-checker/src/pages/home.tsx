@@ -60,13 +60,13 @@ export default function Home() {
           let description = "An error occurred while checking exposure. Please try again.";
           if (error && typeof error === "object") {
             const e = error as { data?: unknown; message?: string; status?: number };
-            if (e.status === 429) {
-              description = "Too many requests. Please wait a moment and try again.";
-            } else if (e.data && typeof e.data === "object") {
+            if (e.data && typeof e.data === "object") {
               const apiMessage = (e.data as { error?: unknown }).error;
               if (typeof apiMessage === "string" && apiMessage.trim()) {
                 description = apiMessage;
               }
+            } else if (e.status === 429) {
+              description = "Too many requests. Please wait a moment and try again.";
             } else if (typeof e.message === "string" && e.message.trim()) {
               description = e.message;
             }
