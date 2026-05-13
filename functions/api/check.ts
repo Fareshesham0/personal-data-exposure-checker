@@ -67,7 +67,7 @@ export const onRequestPost: PagesFunction<Env> = async (ctx) => {
       if (identifierType === "email") {
         const [{ checkEmailBreaches }, { assessBreachSeverity, assessEmailRisk }] =
           await Promise.all([import("../_lib/hibp"), import("../_lib/risk-scoring")]);
-        const breaches = await checkEmailBreaches(identifier, ctx.env.XPOSEDORNOT_API_KEY);
+        const breaches = await checkEmailBreaches(identifier, ctx.env);
         const { riskLevel, riskScore, riskExplanation, recommendations, factors } =
           assessEmailRisk(breaches);
 

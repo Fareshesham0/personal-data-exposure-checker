@@ -1,4 +1,5 @@
 import type { HibpBreach } from "./risk-scoring";
+import type { Env } from "./types";
 
 interface HibpPublicBreach {
   Name: string;
@@ -21,14 +22,24 @@ interface XposedResponse {
   message?: unknown;
 }
 
+interface CachedEmailBreaches {
+  v: 1;
+  breaches: HibpBreach[];
+}
+
 const XPOSED_BASE = "https://api.xposedornot.com/v1";
 const HIBP_PUBLIC_BASE = "https://haveibeenpwned.com/api/v3";
 const PWNED_PASSWORDS_BASE = "https://api.pwnedpasswords.com";
 const CACHE_TTL_MS = 60 * 60 * 1000;
+const EMAIL_CACHE_TTL_SECONDS = 60 * 30;
+const XPOSED_MIN_INTERVAL_MS = 1000;
+const XPOSED_RETRY_DELAYS_MS = [1000, 2000, 4000] as const;
 
 let hibpBreachCachePromise: Promise<Map<string, HibpPublicBreach>> | null = null;
 let cacheTimestamp = 0;
 let lastCacheEntries: number | null = null;
+let xposedNextAllowedAt = 0;
+let xposedRateGate: Promise<void> = Promise.resolve();
 
 const NO_BREACH_MARKERS = new Set([
   "not found",
@@ -48,6 +59,10 @@ function stripHtml(html: string): string {
     .trim();
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function fetchWithTimeout(input: string, init: RequestInit = {}, timeoutMs = 8000): Promise<Response> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -65,6 +80,91 @@ async function sha1UpperHex(value: string): Promise<string> {
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("")
     .toUpperCase();
+}
+
+async function sha256Hex(value: string): Promise<string> {
+  const bytes = new TextEncoder().encode(value);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+async function xposedThrottle(): Promise<void> {
+  const previous = xposedRateGate;
+  let releaseGate: (() => void) | null = null;
+  xposedRateGate = new Promise<void>((resolve) => {
+    releaseGate = resolve;
+  });
+  await previous;
+  try {
+    const now = Date.now();
+    const waitMs = Math.max(0, xposedNextAllowedAt - now);
+    if (waitMs > 0) await sleep(waitMs);
+    xposedNextAllowedAt = Date.now() + XPOSED_MIN_INTERVAL_MS;
+  } finally {
+    releaseGate?.();
+  }
+}
+
+function parseRetryAfterMs(headerValue: string | null): number | null {
+  if (!headerValue) return null;
+  const asSeconds = Number.parseInt(headerValue, 10);
+  if (Number.isNaN(asSeconds) || asSeconds < 0) return null;
+  return asSeconds * 1000;
+}
+
+async function fetchXposedWithRetry(url: string, xposedApiKey?: string): Promise<Response> {
+  for (let attempt = 0; attempt <= XPOSED_RETRY_DELAYS_MS.length; attempt += 1) {
+    await xposedThrottle();
+    const response = await fetchWithTimeout(
+      url,
+      {
+        headers: {
+          "user-agent": "PDEC-FYP/1.0",
+          accept: "application/json",
+          ...(xposedApiKey ? { "x-api-key": xposedApiKey } : {}),
+        },
+      },
+      8_000,
+    );
+
+    if (response.status !== 429) {
+      return response;
+    }
+
+    if (attempt >= XPOSED_RETRY_DELAYS_MS.length) {
+      return response;
+    }
+
+    const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
+    const backoffMs = XPOSED_RETRY_DELAYS_MS[attempt]!;
+    await sleep(Math.max(backoffMs, retryAfterMs ?? 0));
+  }
+  throw new Error("unreachable");
+}
+
+async function getEmailCacheKey(normalizedEmail: string): Promise<string> {
+  const digest = await sha256Hex(normalizedEmail);
+  return `xposed:email:v1:${digest}`;
+}
+
+async function getCachedEmailBreaches(env: Env, cacheKey: string): Promise<CachedEmailBreaches | null> {
+  try {
+    return (await env.PDEC_KV.get(cacheKey, "json")) as CachedEmailBreaches | null;
+  } catch {
+    return null;
+  }
+}
+
+async function putCachedEmailBreaches(env: Env, cacheKey: string, breaches: HibpBreach[]): Promise<void> {
+  try {
+    await env.PDEC_KV.put(cacheKey, JSON.stringify({ v: 1, breaches } satisfies CachedEmailBreaches), {
+      expirationTtl: EMAIL_CACHE_TTL_SECONDS,
+    });
+  } catch {
+    // Cache failures should not block live breach checks.
+  }
 }
 
 async function getHibpBreachCache(): Promise<Map<string, HibpPublicBreach>> {
@@ -129,22 +229,19 @@ function normalizeBreachNames(data: XposedResponse): string[] {
   return unique;
 }
 
-export async function checkEmailBreaches(email: string, xposedApiKey?: string): Promise<HibpBreach[]> {
+export async function checkEmailBreaches(email: string, env: Env): Promise<HibpBreach[]> {
   const normalizedEmail = email.trim().toLowerCase();
+  const cacheKey = await getEmailCacheKey(normalizedEmail);
+  const cached = await getCachedEmailBreaches(env, cacheKey);
+  if (cached && cached.v === 1 && Array.isArray(cached.breaches)) {
+    return cached.breaches;
+  }
+
   const url = `${XPOSED_BASE}/check-email/${encodeURIComponent(normalizedEmail)}`;
   try {
-    const response = await fetchWithTimeout(
-      url,
-      {
-        headers: {
-          "user-agent": "PDEC-FYP/1.0",
-          accept: "application/json",
-          ...(xposedApiKey ? { "x-api-key": xposedApiKey } : {}),
-        },
-      },
-      8_000,
-    );
+    const response = await fetchXposedWithRetry(url, env.XPOSEDORNOT_API_KEY);
     if (response.status === 404) {
+      await putCachedEmailBreaches(env, cacheKey, []);
       return [];
     }
     if (response.status === 429) {
@@ -153,12 +250,17 @@ export async function checkEmailBreaches(email: string, xposedApiKey?: string): 
     if (!response.ok) {
       throw Object.assign(new Error("Breach intelligence service temporarily unavailable"), { statusCode: 503 });
     }
+
     const data = (await response.json()) as XposedResponse;
     const breachNames = normalizeBreachNames(data);
-    if (breachNames.length === 0) return [];
+    if (breachNames.length === 0) {
+      await putCachedEmailBreaches(env, cacheKey, []);
+      return [];
+    }
+
     try {
       const cache = await getHibpBreachCache();
-      return breachNames.map((name): HibpBreach => {
+      const resolvedBreaches = breachNames.map((name): HibpBreach => {
         const meta = cache.get(name.toLowerCase());
         if (!meta) {
           return {
@@ -185,8 +287,10 @@ export async function checkEmailBreaches(email: string, xposedApiKey?: string): 
           IsSensitive: meta.IsSensitive,
         };
       });
+      await putCachedEmailBreaches(env, cacheKey, resolvedBreaches);
+      return resolvedBreaches;
     } catch {
-      return breachNames.map((name): HibpBreach => ({
+      const fallbackBreaches = breachNames.map((name): HibpBreach => ({
         Name: name,
         Domain: "",
         BreachDate: "",
@@ -197,6 +301,8 @@ export async function checkEmailBreaches(email: string, xposedApiKey?: string): 
         IsVerified: false,
         IsSensitive: false,
       }));
+      await putCachedEmailBreaches(env, cacheKey, fallbackBreaches);
+      return fallbackBreaches;
     }
   } catch (error) {
     const e = error as Error & { statusCode?: number };
