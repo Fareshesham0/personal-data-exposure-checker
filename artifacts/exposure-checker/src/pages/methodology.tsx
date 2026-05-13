@@ -30,15 +30,15 @@ export default function Methodology() {
           </div>
         </div>
         <p className="text-sm text-muted-foreground">
-          See also:{" "}
+          Need help or want to report an issue?{" "}
           <Link
-            href="/stats"
+            href="/contact"
             className="text-primary hover:underline underline-offset-2"
-            data-testid="methodology-stats-link"
+            data-testid="methodology-contact-link"
           >
-            live performance metrics
-          </Link>{" "}
-          for request counts, latency percentiles, and cache hit-rate.
+            Contact us
+          </Link>
+          .
         </p>
       </header>
 

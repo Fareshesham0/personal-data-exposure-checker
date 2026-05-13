@@ -28,6 +28,13 @@ export function Layout({ children }: { children: React.ReactNode }) {
             >
               Methodology
             </Link>
+            <Link
+              href="/contact"
+              className="hidden sm:inline-block hover:text-foreground transition-colors"
+              data-testid="nav-contact"
+            >
+              Contact
+            </Link>
             <div className="hidden sm:flex items-center gap-1.5 px-3 py-1 rounded-full bg-muted border border-border/50">
               <Activity className="w-3.5 h-3.5" />
               {isLoading ? (
@@ -57,11 +64,11 @@ export function Layout({ children }: { children: React.ReactNode }) {
           <p className="opacity-70">Passwords use k-anonymity - only a partial hash is transmitted. No identifier is stored or logged.</p>
           <p className="opacity-70">
             <Link
-              href="/stats"
+              href="/contact"
               className="hover:text-foreground transition-colors underline-offset-2 hover:underline"
-              data-testid="footer-stats-link"
+              data-testid="footer-contact-link"
             >
-              Stats
+              Contact Us
             </Link>
             <span className="mx-2">·</span>
             <Link

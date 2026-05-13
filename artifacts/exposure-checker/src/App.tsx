@@ -9,7 +9,7 @@ import { Layout } from "@/components/layout";
 import Home from "@/pages/home";
 import Results from "@/pages/results";
 import Methodology from "@/pages/methodology";
-import Stats from "@/pages/stats";
+import Contact from "@/pages/contact";
 import NotFound from "@/pages/not-found";
 
 const queryClient = new QueryClient({
@@ -27,7 +27,7 @@ function Router() {
       <Route path="/" component={Home} />
       <Route path="/results" component={Results} />
       <Route path="/methodology" component={Methodology} />
-      <Route path="/stats" component={Stats} />
+      <Route path="/contact" component={Contact} />
       <Route component={NotFound} />
     </Switch>
   );

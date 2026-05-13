@@ -31,15 +31,21 @@ const XPOSED_BASE = "https://api.xposedornot.com/v1";
 const HIBP_PUBLIC_BASE = "https://haveibeenpwned.com/api/v3";
 const PWNED_PASSWORDS_BASE = "https://api.pwnedpasswords.com";
 const CACHE_TTL_MS = 60 * 60 * 1000;
-const EMAIL_CACHE_TTL_SECONDS = 60 * 30;
+const EMAIL_CACHE_TTL_SECONDS = 60 * 60 * 6;
 const XPOSED_MIN_INTERVAL_MS = 1000;
-const XPOSED_RETRY_DELAYS_MS = [1000, 2000, 4000] as const;
+const XPOSED_RETRY_DELAYS_MS = [1000, 2000, 4000, 4000] as const;
+const XPOSED_GLOBAL_QUEUE_WAIT_MS = 12_000;
+const XPOSED_GLOBAL_NEXT_KEY = "xposed:global:nextAllowedAt:v1";
+const HIBP_EMAIL_MIN_INTERVAL_MS = 1500;
+const HIBP_EMAIL_RETRY_DELAYS_MS = [1000, 2000, 4000] as const;
 
 let hibpBreachCachePromise: Promise<Map<string, HibpPublicBreach>> | null = null;
 let cacheTimestamp = 0;
 let lastCacheEntries: number | null = null;
 let xposedNextAllowedAt = 0;
 let xposedRateGate: Promise<void> = Promise.resolve();
+let hibpEmailNextAllowedAt = 0;
+let hibpEmailRateGate: Promise<void> = Promise.resolve();
 
 const NO_BREACH_MARKERS = new Set([
   "not found",
@@ -107,6 +113,23 @@ async function xposedThrottle(): Promise<void> {
   }
 }
 
+async function hibpEmailThrottle(): Promise<void> {
+  const previous = hibpEmailRateGate;
+  let releaseGate: (() => void) | null = null;
+  hibpEmailRateGate = new Promise<void>((resolve) => {
+    releaseGate = resolve;
+  });
+  await previous;
+  try {
+    const now = Date.now();
+    const waitMs = Math.max(0, hibpEmailNextAllowedAt - now);
+    if (waitMs > 0) await sleep(waitMs);
+    hibpEmailNextAllowedAt = Date.now() + HIBP_EMAIL_MIN_INTERVAL_MS;
+  } finally {
+    releaseGate?.();
+  }
+}
+
 function parseRetryAfterMs(headerValue: string | null): number | null {
   if (!headerValue) return null;
   const asSeconds = Number.parseInt(headerValue, 10);
@@ -114,9 +137,10 @@ function parseRetryAfterMs(headerValue: string | null): number | null {
   return asSeconds * 1000;
 }
 
-async function fetchXposedWithRetry(url: string, xposedApiKey?: string): Promise<Response> {
+async function fetchXposedWithRetry(url: string, xposedApiKey: string | undefined, env: Env): Promise<Response> {
   for (let attempt = 0; attempt <= XPOSED_RETRY_DELAYS_MS.length; attempt += 1) {
     await xposedThrottle();
+    await waitForXposedGlobalSlot(env, XPOSED_GLOBAL_QUEUE_WAIT_MS);
     const response = await fetchWithTimeout(
       url,
       {
@@ -144,9 +168,65 @@ async function fetchXposedWithRetry(url: string, xposedApiKey?: string): Promise
   throw new Error("unreachable");
 }
 
-async function getEmailCacheKey(normalizedEmail: string): Promise<string> {
+async function waitForXposedGlobalSlot(env: Env, maxWaitMs: number): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < maxWaitMs) {
+    const now = Date.now();
+    const raw = await env.PDEC_KV.get(XPOSED_GLOBAL_NEXT_KEY);
+    const nextAllowedAt = Number.parseInt(raw ?? "0", 10) || 0;
+    if (nextAllowedAt > now) {
+      await sleep(Math.min(nextAllowedAt - now, 400));
+      continue;
+    }
+
+    const candidateNext = now + XPOSED_MIN_INTERVAL_MS;
+    await env.PDEC_KV.put(XPOSED_GLOBAL_NEXT_KEY, String(candidateNext), {
+      expirationTtl: 120,
+    });
+    const verifyRaw = await env.PDEC_KV.get(XPOSED_GLOBAL_NEXT_KEY);
+    const verifyValue = Number.parseInt(verifyRaw ?? "0", 10) || 0;
+    if (verifyValue === candidateNext) {
+      return;
+    }
+
+    await sleep(100);
+  }
+
+  throw Object.assign(new Error("Rate limit queue wait exceeded"), { statusCode: 429 });
+}
+
+async function fetchHibpEmailWithRetry(url: string, apiKey: string): Promise<Response> {
+  for (let attempt = 0; attempt <= HIBP_EMAIL_RETRY_DELAYS_MS.length; attempt += 1) {
+    await hibpEmailThrottle();
+    const response = await fetchWithTimeout(
+      url,
+      {
+        headers: {
+          "user-agent": "PDEC-FYP/1.0",
+          "hibp-api-key": apiKey,
+        },
+      },
+      8_000,
+    );
+
+    if (response.status !== 429) {
+      return response;
+    }
+
+    if (attempt >= HIBP_EMAIL_RETRY_DELAYS_MS.length) {
+      return response;
+    }
+
+    const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
+    const backoffMs = HIBP_EMAIL_RETRY_DELAYS_MS[attempt]!;
+    await sleep(Math.max(backoffMs, retryAfterMs ?? 0));
+  }
+  throw new Error("unreachable");
+}
+
+async function getEmailCacheKey(provider: "xposed" | "hibp", normalizedEmail: string): Promise<string> {
   const digest = await sha256Hex(normalizedEmail);
-  return `xposed:email:v1:${digest}`;
+  return `${provider}:email:v1:${digest}`;
 }
 
 async function getCachedEmailBreaches(env: Env, cacheKey: string): Promise<CachedEmailBreaches | null> {
@@ -231,15 +311,55 @@ function normalizeBreachNames(data: XposedResponse): string[] {
 
 export async function checkEmailBreaches(email: string, env: Env): Promise<HibpBreach[]> {
   const normalizedEmail = email.trim().toLowerCase();
-  const cacheKey = await getEmailCacheKey(normalizedEmail);
+  const usingHibpPaid = typeof env.HIBP_API_KEY === "string" && env.HIBP_API_KEY.trim().length > 0;
+  const cacheKey = await getEmailCacheKey(usingHibpPaid ? "hibp" : "xposed", normalizedEmail);
   const cached = await getCachedEmailBreaches(env, cacheKey);
   if (cached && cached.v === 1 && Array.isArray(cached.breaches)) {
     return cached.breaches;
   }
 
+  if (usingHibpPaid) {
+    const url = `${HIBP_PUBLIC_BASE}/breachedaccount/${encodeURIComponent(normalizedEmail)}?truncateResponse=false`;
+    try {
+      const response = await fetchHibpEmailWithRetry(url, env.HIBP_API_KEY!.trim());
+      if (response.status === 404) {
+        await putCachedEmailBreaches(env, cacheKey, []);
+        return [];
+      }
+      if (response.status === 429) {
+        throw Object.assign(new Error("Rate limit exceeded"), { statusCode: 429 });
+      }
+      if (response.status === 401 || response.status === 403) {
+        throw Object.assign(new Error("Invalid or unauthorized HIBP API key"), { statusCode: 503 });
+      }
+      if (!response.ok) {
+        throw Object.assign(new Error("Breach intelligence service temporarily unavailable"), { statusCode: 503 });
+      }
+
+      const records = (await response.json()) as HibpPublicBreach[];
+      const breaches = records.map((b): HibpBreach => ({
+        Name: b.Title || b.Name,
+        Domain: b.Domain,
+        BreachDate: b.BreachDate,
+        AddedDate: b.AddedDate,
+        PwnCount: b.PwnCount,
+        Description: b.Description ? stripHtml(b.Description) : "",
+        DataClasses: Array.isArray(b.DataClasses) ? b.DataClasses : [],
+        IsVerified: !!b.IsVerified,
+        IsSensitive: !!b.IsSensitive,
+      }));
+      await putCachedEmailBreaches(env, cacheKey, breaches);
+      return breaches;
+    } catch (error) {
+      const e = error as Error & { statusCode?: number };
+      if (e.statusCode) throw e;
+      throw Object.assign(new Error("Breach intelligence service temporarily unavailable"), { statusCode: 503 });
+    }
+  }
+
   const url = `${XPOSED_BASE}/check-email/${encodeURIComponent(normalizedEmail)}`;
   try {
-    const response = await fetchXposedWithRetry(url, env.XPOSEDORNOT_API_KEY);
+    const response = await fetchXposedWithRetry(url, env.XPOSEDORNOT_API_KEY, env);
     if (response.status === 404) {
       await putCachedEmailBreaches(env, cacheKey, []);
       return [];
