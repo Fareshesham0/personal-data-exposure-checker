@@ -2,6 +2,8 @@ import { getIp, json, options, parseJson } from "../_lib/http";
 import type { Env } from "../_lib/types";
 
 const FEEDBACK_TO_EMAIL = "pdec.contectus@gmail.com";
+const RESEND_API_BASE = "https://api.resend.com";
+const DEFAULT_FROM_EMAIL = "PDEC Feedback <onboarding@resend.dev>";
 const FEEDBACK_WINDOW_MS = 60_000;
 const FEEDBACK_MAX_PER_WINDOW = 5;
 const FEEDBACK_TTL_SECONDS = 60 * 60 * 24 * 30;
@@ -44,6 +46,50 @@ async function allowFeedback(env: Env, ip: string): Promise<boolean> {
   return true;
 }
 
+async function sendFeedbackEmail(
+  env: Env,
+  feedback: { issueType: string; message: string; receivedAt: string },
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const apiKey = env.RESEND_API_KEY?.trim();
+  if (!apiKey) return { ok: false, reason: "RESEND_API_KEY is not configured." };
+
+  const from = env.RESEND_FROM_EMAIL?.trim() || DEFAULT_FROM_EMAIL;
+  const subject = `[PDEC Feedback] ${feedback.issueType}`;
+  const text = [
+    "New feedback submitted from Personal Data Exposure Checker.",
+    "",
+    `Issue type: ${feedback.issueType}`,
+    `Received at: ${feedback.receivedAt}`,
+    "",
+    "Message:",
+    feedback.message,
+  ].join("\n");
+
+  let response: Response;
+  try {
+    response = await fetch(`${RESEND_API_BASE}/emails`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        from,
+        to: [FEEDBACK_TO_EMAIL],
+        subject,
+        text,
+      }),
+    });
+  } catch {
+    return { ok: false, reason: "Resend API network error." };
+  }
+
+  if (!response.ok) {
+    return { ok: false, reason: `Resend API returned ${response.status}.` };
+  }
+  return { ok: true };
+}
+
 export const onRequestOptions = () => options();
 
 export const onRequestPost: PagesFunction<Env> = async (ctx) => {
@@ -69,10 +115,23 @@ export const onRequestPost: PagesFunction<Env> = async (ctx) => {
     ipHashHint: ip === "unknown" ? "unknown" : "redacted",
   };
   const key = `feedback:${Date.now()}:${crypto.randomUUID()}`;
+  const emailResult = await sendFeedbackEmail(ctx.env, {
+    issueType: payload.issueType,
+    message: payload.message,
+    receivedAt: payload.receivedAt,
+  });
+
   await ctx.env.PDEC_KV.put(key, JSON.stringify(payload), { expirationTtl: FEEDBACK_TTL_SECONDS });
+
+  if (!emailResult.ok) {
+    return json({
+      ok: true,
+      message: `Feedback saved. Email delivery is not configured yet (${emailResult.reason}).`,
+    });
+  }
 
   return json({
     ok: true,
-    message: `Feedback submitted. It is queued for review at ${FEEDBACK_TO_EMAIL}.`,
+    message: `Feedback submitted and emailed to ${FEEDBACK_TO_EMAIL}.`,
   });
 };
