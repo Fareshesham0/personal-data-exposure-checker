@@ -2,9 +2,6 @@ name = "personal-data-exposure-checker"
 compatibility_date = "2026-04-28"
 pages_build_output_dir = "artifacts/exposure-checker/dist/public"
 
-[build]
-command = "corepack enable && corepack prepare pnpm@10.19.0 --activate && pnpm install --frozen-lockfile && pnpm run build:pages"
-
 [[kv_namespaces]]
 binding = "PDEC_KV"
 id = "382a40a31b3b45d1b3a5773361eb2c7c"
